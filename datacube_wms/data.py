@@ -7,6 +7,8 @@ from affine import Affine
 from rasterio.io import MemoryFile
 from skimage.draw import polygon as skimg_polygon
 
+import pytz
+
 import datacube
 from datacube.utils import geometry
 
@@ -18,6 +20,9 @@ except:
 from datacube_wms.wms_utils import resp_headers, img_coords_to_geopoint, int_trim, \
         bounding_box_to_geom, GetMapParameters, GetFeatureInfoParameters, \
         solar_correct_data
+
+from itertools import chain
+import re
 
 
 class DataStacker(object):
@@ -69,6 +74,14 @@ class DataStacker(object):
         datasets = index.datasets.search_eager(**query.search_terms)
         # And sort by date
         try:
+            # MDBA data has issues with TZ information
+            # normalize missing TZs to UTC
+            def add_tz(d):
+                dt = d.center_time
+                if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                    d.center_time = pytz.utc.localize(dt)
+                return d
+            datasets = [add_tz(d) for d in datasets]
             datasets = sorted(datasets, key=lambda d: d.center_time)
         except:
             msg = ""
@@ -220,7 +233,6 @@ class DataStacker(object):
 def get_map(args):
     # Parse GET parameters
     params = GetMapParameters(args)
-
     # Tiling.
     stacker = DataStacker(params.product, params.geobox, params.time, style=params.style)
     dc = get_cube()
@@ -348,6 +360,24 @@ def _write_polygon(geobox, polygon, zoom_fill):
                 thing.write_band(idx, data * fill)
         return memfile.read()
 
+def get_s3_browser_uris(datasets):
+    uris = [d.uris for d in datasets]
+    uris = list(chain.from_iterable(uris))
+    unique_uris = set(uris)
+
+    # convert to browsable link
+    def convert(uri):
+        regex = re.compile("s3:\/\/(?P<bucket>[a-zA-Z0-9_\-]+)\/(?P<prefix>[a-zA-Z0-9_\-\/]+)ARD-METADATA.yaml")
+        uri_format = "http://{bucket}.s3-website-ap-southeast-2.amazonaws.com/?prefix={prefix}"
+        result = regex.match(uri)
+        if result is not None:
+            new_uri = uri_format.format(bucket=result.group("bucket"),
+                                        prefix=result.group("prefix"))
+        return new_uri;
+
+    formatted = [convert(uri) for uri in unique_uris]
+
+    return formatted
 
 def feature_info(args):
     # Parse GET parameters
@@ -361,7 +391,7 @@ def feature_info(args):
     dc = get_cube()
     try:
         geo_point = img_coords_to_geopoint(params.geobox, params.i, params.j)
-        datasets = stacker.datasets(dc.index, all_time=True,
+        datasets = stacker.datasets(dc.index, all_time=False,
                                   point=geo_point)
         pq_datasets = stacker.datasets(dc.index, mask=True, all_time=False,
                                      point=geo_point)
@@ -381,100 +411,106 @@ def feature_info(args):
         else:
             available_dates = set()
             drill = {}
-            for d in datasets:
-                idx_date = (d.center_time + timedelta(hours=params.product.time_zone)).date()
-                available_dates.add(idx_date)
-                pixel_ds = None
-                if idx_date == params.time and "lon" not in feature_json:
-                    data = stacker.data([d], skip_corrections=True)
-
-                    # Use i,j image coordinates to extract data pixel from dataset, and
-                    # convert to lat/long geographic coordinates
-                    if service_cfg["published_CRSs"][params.crsid]["geographic"]:
-                        # Geographic coordinate systems (e.g. EPSG:4326/WGS-84) are already in lat/long
-                        feature_json["lat"] = data.latitude[params.j].item()
-                        feature_json["lon"] = data.longitude[params.i].item()
-                        pixel_ds = data.isel(**isel_kwargs)
-                    else:
-                        # Non-geographic coordinate systems need to be projected onto a geographic
-                        # coordinate system.  Why not use EPSG:4326?
-                        # Extract coordinates in CRS
-                        data_x = getattr(data, h_coord)
-                        data_y = getattr(data, v_coord)
-
-                        x = data_x[params.i].item()
-                        y = data_y[params.j].item()
-                        pt = geometry.point(x, y, params.crs)
-
-                        # Project to EPSG:4326
-                        crs_geo = geometry.CRS("EPSG:4326")
-                        ptg = pt.to_crs(crs_geo)
-
-                        # Capture lat/long coordinates
-                        feature_json["lon"], feature_json["lat"] = ptg.coords[0]
-
-                    # Extract data pixel
-                    pixel_ds = data.isel(**isel_kwargs)
-
-                    # Get accurate timestamp from dataset
-                    feature_json["time"] = d.center_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                    # Collect raw band values for pixel
-                    feature_json["bands"] = {}
-                    for band in stacker.needed_bands():
-                        band_val = pixel_ds[band].item()
-                        if band_val == -999:
-                            feature_json["bands"][band] = "n/a"
-                        else:
-                            feature_json["bands"][band] = pixel_ds[band].item()
-                if params.product.band_drill:
-                    if pixel_ds is None:
+            feature_json["data_links"] = get_s3_browser_uris(datasets)
+            # For MDBA NRT, some data may not be available where it is indexed
+            # catch any execptions which may result because of this
+            try:
+                for d in datasets:
+                    idx_date = (d.center_time + timedelta(hours=params.product.time_zone)).date()
+                    available_dates.add(idx_date)
+                    pixel_ds = None
+                    if idx_date == params.time and "lon" not in feature_json:
                         data = stacker.data([d], skip_corrections=True)
-                        pixel_ds = data.isel(**isel_kwargs)
-                    drill_section = { }
-                    for band in params.product.band_drill:
-                        band_val = pixel_ds[band].item()
-                        if band_val == -999:
-                            drill_section[band] = "n/a"
-                        else:
-                            drill_section[band] = pixel_ds[band].item()
-                    drill[idx_date.strftime("%Y-%m-%d")] = drill_section
-            if drill:
-                feature_json["time_drill"] = drill
-                feature_json["datasets_read"] = len(datasets)
-            my_flags = 0
-            pqdi =-1
-            for pqd in pq_datasets:
-                pqdi += 1
-                idx_date = (pqd.center_time + timedelta(hours=params.product.time_zone)).date()
-                if idx_date == params.time:
-                    pq_data = stacker.data([pqd], mask=True)
-                    pq_pixel_ds = pq_data.isel(**isel_kwargs)
-                    # PQ flags
-                    m = params.product.pq_product.measurements[params.product.pq_band]
-                    flags = pq_pixel_ds[params.product.pq_band].item()
-                    if not flags & ~params.product.info_mask:
-                        my_flags = my_flags | flags
-                    else:
-                        continue
-                    feature_json["flags"] = {}
-                    for mk, mv in m["flags_definition"].items():
-                        if mk in params.product.ignore_flags_info:
-                            continue
-                        bits = mv["bits"]
-                        values = mv["values"]
-                        if not isinstance(bits, int):
-                            continue
-                        flag = 1 << bits
-                        if my_flags & flag:
-                            val = values['1']
-                        else:
-                            val = values['0']
-                        feature_json["flags"][mk] = val
 
-            lads = list(available_dates)
-            lads.sort()
-            feature_json["data_available_for_dates"] = [d.strftime("%Y-%m-%d") for d in lads]
+                        # Use i,j image coordinates to extract data pixel from dataset, and
+                        # convert to lat/long geographic coordinates
+                        if service_cfg["published_CRSs"][params.crsid]["geographic"]:
+                            # Geographic coordinate systems (e.g. EPSG:4326/WGS-84) are already in lat/long
+                            feature_json["lat"] = data.latitude[params.j].item()
+                            feature_json["lon"] = data.longitude[params.i].item()
+                            pixel_ds = data.isel(**isel_kwargs)
+                        else:
+                            # Non-geographic coordinate systems need to be projected onto a geographic
+                            # coordinate system.  Why not use EPSG:4326?
+                            # Extract coordinates in CRS
+                            data_x = getattr(data, h_coord)
+                            data_y = getattr(data, v_coord)
+
+                            x = data_x[params.i].item()
+                            y = data_y[params.j].item()
+                            pt = geometry.point(x, y, params.crs)
+
+                            # Project to EPSG:4326
+                            crs_geo = geometry.CRS("EPSG:4326")
+                            ptg = pt.to_crs(crs_geo)
+
+                            # Capture lat/long coordinates
+                            feature_json["lon"], feature_json["lat"] = ptg.coords[0]
+
+                        # Extract data pixel
+                        pixel_ds = data.isel(**isel_kwargs)
+
+                        # Get accurate timestamp from dataset
+                        feature_json["time"] = d.center_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+                        # Collect raw band values for pixel
+                        feature_json["bands"] = {}
+                        for band in stacker.needed_bands():
+                            band_val = pixel_ds[band].item()
+                            if band_val == -999:
+                                feature_json["bands"][band] = "n/a"
+                            else:
+                                feature_json["bands"][band] = pixel_ds[band].item()
+                    if params.product.band_drill:
+                        if pixel_ds is None:
+                            data = stacker.data([d], skip_corrections=True)
+                            pixel_ds = data.isel(**isel_kwargs)
+                        drill_section = { }
+                        for band in params.product.band_drill:
+                            band_val = pixel_ds[band].item()
+                            if band_val == -999:
+                                drill_section[band] = "n/a"
+                            else:
+                                drill_section[band] = pixel_ds[band].item()
+                        drill[idx_date.strftime("%Y-%m-%d")] = drill_section
+                if drill:
+                    feature_json["time_drill"] = drill
+                    feature_json["datasets_read"] = len(datasets)
+                my_flags = 0
+                pqdi =-1
+                for pqd in pq_datasets:
+                    pqdi += 1
+                    idx_date = (pqd.center_time + timedelta(hours=params.product.time_zone)).date()
+                    if idx_date == params.time:
+                        pq_data = stacker.data([pqd], mask=True)
+                        pq_pixel_ds = pq_data.isel(**isel_kwargs)
+                        # PQ flags
+                        m = params.product.pq_product.measurements[params.product.pq_band]
+                        flags = pq_pixel_ds[params.product.pq_band].item()
+                        if not flags & ~params.product.info_mask:
+                            my_flags = my_flags | flags
+                        else:
+                            continue
+                        feature_json["flags"] = {}
+                        for mk, mv in m["flags_definition"].items():
+                            if mk in params.product.ignore_flags_info:
+                                continue
+                            bits = mv["bits"]
+                            values = mv["values"]
+                            if not isinstance(bits, int):
+                                continue
+                            flag = 1 << bits
+                            if my_flags & flag:
+                                val = values['1']
+                            else:
+                                val = values['0']
+                            feature_json["flags"][mk] = val
+
+                lads = list(available_dates)
+                lads.sort()
+                feature_json["data_available_for_dates"] = [d.strftime("%Y-%m-%d") for d in lads]
+            except Exception as e:
+                pass
         release_cube(dc)
     except Exception as e:
         release_cube(dc)
