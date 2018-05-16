@@ -367,7 +367,7 @@ def get_s3_browser_uris(datasets):
 
     # convert to browsable link
     def convert(uri):
-        regex = re.compile("s3:\/\/(?P<bucket>[a-zA-Z0-9_\-]+)\/(?P<prefix>[a-zA-Z0-9_\-\/]+)ARD-METADATA.yaml")
+        regex = re.compile("s3:\/\/(?P<bucket>[a-zA-Z0-9_\-]+)\/(?P<prefix>[\S]+)ARD-METADATA.yaml")
         uri_format = "http://{bucket}.s3-website-ap-southeast-2.amazonaws.com/?prefix={prefix}"
         result = regex.match(uri)
         if result is not None:
