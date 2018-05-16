@@ -373,6 +373,8 @@ def get_s3_browser_uris(datasets):
         if result is not None:
             new_uri = uri_format.format(bucket=result.group("bucket"),
                                         prefix=result.group("prefix"))
+        else:
+            new_uri = uri;
         return new_uri;
 
     formatted = [convert(uri) for uri in unique_uris]
