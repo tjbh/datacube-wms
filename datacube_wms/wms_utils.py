@@ -53,7 +53,10 @@ def wms_exception(e, traceback=[]):
 def _get_geobox(args, crs):
     width = int(args['width'])
     height = int(args['height'])
-    minx, miny, maxx, maxy = map(float, args['bbox'].split(','))
+    if service_cfg["published_CRSs"][crs.crs_str].get("vertical_coord_first"):
+        miny, minx, maxy, maxx = map(float, args['bbox'].split(','))
+    else:
+        minx, miny, maxx, maxy = map(float, args['bbox'].split(','))
 
     # miny-maxy for negative scale factor and maxy in the translation, includes inversion of Y axis.
     affine = Affine.translation(minx, maxy) * Affine.scale((maxx - minx) / width, (miny - maxy) / height)
@@ -99,8 +102,10 @@ def zoom_factor(args, crs):
 
 
 def img_coords_to_geopoint(geobox, i, j):
-    return geometry.point(geobox.coordinates["x"].values[int(i)],
-                          geobox.coordinates["y"].values[int(j)],
+    h_coord = service_cfg["published_CRSs"][geobox.crs.crs_str].get("horizontal_coord", "longitude")
+    v_coord = service_cfg["published_CRSs"][geobox.crs.crs_str].get("vertical_coord", "latitude")
+    return geometry.point(geobox.coordinates[h_coord].values[int(i)],
+                          geobox.coordinates[v_coord].values[int(j)],
                           geobox.crs)
 
 
