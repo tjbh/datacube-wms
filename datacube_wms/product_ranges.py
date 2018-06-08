@@ -129,13 +129,13 @@ def get_sqlconn(dc):
 
 
 def get_ids_in_db(conn):
-    results = conn.execute("select id from wms.product_ranges")
+    results = conn.execute("select id from agdc.product_ranges")
     ids =  [r["id"] for r in results]
     return ids
 
 
 def get_subids_in_db(conn):
-    results = conn.execute("select product_id, sub_product_id from wms.sub_product_ranges order by product_id, sub_product_id")
+    results = conn.execute("select product_id, sub_product_id from agdc.sub_product_ranges order by product_id, sub_product_id")
     ids =  [(r["product_id"], r["sub_product_id"]) for r in results]
     return ids
 
@@ -143,7 +143,7 @@ def get_subids_in_db(conn):
 def rng_update(conn, rng):
     if rng.get("sub_id"):
         conn.execute("""
-            UPDATE wms.sub_product_ranges
+            UPDATE agdc.sub_product_ranges
             SET
                   lat_min=%s,
                   lat_max=%s,
@@ -169,7 +169,7 @@ def rng_update(conn, rng):
 
     else:
         conn.execute("""
-            UPDATE wms.product_ranges
+            UPDATE agdc.product_ranges
             SET
                   lat_min=%s,
                   lat_max=%s,
@@ -195,7 +195,7 @@ def rng_update(conn, rng):
 def rng_insert(conn, rng):
     if rng.get("sub_id"):
         conn.execute("""
-                INSERT into wms.sub_product_ranges
+                INSERT into agdc.sub_product_ranges
                     (product_id, sub_product_id,  lat_min,lat_max,lon_min,lon_max,   dates,bboxes)
                 VALUES
                     (%s,%s,   %s,%s,%s,%s,    %s,%s)
@@ -215,7 +215,7 @@ def rng_insert(conn, rng):
                      )
     else:
         conn.execute("""
-                INSERT into wms.product_ranges
+                INSERT into agdc.product_ranges
                     (id,   lat_min,lat_max,lon_min,lon_max,   dates,bboxes)
                 VALUES
                     (%s,   %s,%s,%s,%s,    %s,%s)
@@ -365,9 +365,9 @@ def get_ranges(dc, product, path=None):
 
     conn = get_sqlconn(dc)
     if path is not None:
-        results = conn.execute("select * from wms.sub_product_ranges where product_id=%s and sub_product_id=%s", product_id, path)
+        results = conn.execute("select * from agdc.sub_product_ranges where product_id=%s and sub_product_id=%s", product_id, path)
     else:
-        results = conn.execute("select * from wms.product_ranges where id=%s", product_id)
+        results = conn.execute("select * from agdc.product_ranges where id=%s", product_id)
     for result in results:
         conn.close()
         times = [datetime.strptime(d, "%Y-%m-%d").date() for d in result["dates"]]
@@ -397,5 +397,5 @@ def get_sub_ranges(dc, product):
         product_id = product.id
 
     conn = get_sqlconn(dc)
-    results = conn.execute("select sub_product_id from wms.sub_product_ranges where product_id=%s", product_id)
+    results = conn.execute("select sub_product_id from agdc.sub_product_ranges where product_id=%s", product_id)
     return { r["sub_product_id"]: get_ranges(dc, product_id, r["sub_product_id"]) for r in results }
